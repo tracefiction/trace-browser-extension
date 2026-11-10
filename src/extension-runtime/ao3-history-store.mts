@@ -63,6 +63,16 @@ export function mergeHistoryWork(kept: HistoryWork, seen: HistoryWork): HistoryW
     lastVisited: later(kept.lastVisited, seen.lastVisited),
     visits: most(kept.visits, seen.visits),
     later: kept.later && seen.later,
+    // The kinds belong to the tags that were kept.
+    tagKinds: (kept.tags.length ? kept.tagKinds : seen.tagKinds) ?? null,
+    rating: kept.rating ?? seen.rating ?? null,
+    categories: kept.categories ?? seen.categories ?? null,
+    complete: kept.complete ?? seen.complete ?? null,
+    language: kept.language ?? seen.language ?? null,
+    kudos: kept.kudos ?? seen.kudos ?? null,
+    hits: kept.hits ?? seen.hits ?? null,
+    updated: kept.updated ?? seen.updated ?? null,
+    sinceVisit: kept.sinceVisit ?? seen.sinceVisit ?? null,
   };
 }
 

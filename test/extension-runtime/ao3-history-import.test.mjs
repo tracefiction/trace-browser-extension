@@ -22,6 +22,7 @@ import {
   PAGE_GAP_MS,
   RETRY_MAX_MS,
   SAVE_SETTLE_MS,
+  yearFirstDay,
 } from "../../.trace-build/extension-runtime/ao3-history-import.mjs";
 import {
   IndexedDbHistoryStore,
@@ -38,13 +39,13 @@ const TAB = 42;
 
 const escapeHTML = (s) => String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 
-function work(id, { title = `Invented work ${id}`, author = "Synthetic_Quill", later = false, visited = "08 Oct 2026", times = 3, summary = `Invented summary ${id}.` } = {}) {
+function work(id, { title = `Invented work ${id}`, author = "Synthetic_Quill", later = false, visited = "08 Oct 2026", times = 3, summary = `Invented summary ${id}.`, tags = '<li class="freeforms"><a class="tag" href="/tags/found/works">Found Family</a></li>' } = {}) {
   const visit = `Last visited: ${visited} ${later ? "(Marked for Later.) " : ""}(Latest version.) Visited ${times === 1 ? "once" : `${times} times`}`;
   return `<li id="work_${id}" class="reading work blurb group" role="article"><div class="header module">` +
     `<h4 class="heading"><a href="/works/${id}">${escapeHTML(title)}</a> by <a rel="author" href="/users/${author}/pseuds/${author}">${escapeHTML(author)}</a></h4>` +
     `<h5 class="fandoms heading"><a class="tag" href="/tags/invented/works">Invented Lanterns</a></h5>` +
     `<ul class="required-tags"><li><span class="rating" title="General Audiences"><span class="text">General Audiences</span></span></li></ul></div>` +
-    `<ul class="tags commas"><li class="freeforms"><a class="tag" href="/tags/found/works">Found Family</a></li></ul>` +
+    `<ul class="tags commas">${tags}</ul>` +
     `<blockquote class="userstuff summary"><p>${escapeHTML(summary)}</p></blockquote>` +
     `<dl class="stats"><dd class="words">12,345</dd><dd class="chapters">3/3</dd></dl>` +
     `<div class="user module group"><h4 class="viewed heading">${escapeHTML(visit)}</h4></div></li>`;
@@ -93,6 +94,7 @@ function harness({
   saves = { inFlight: 0, lastEndedAt: 0 },
   account = { id: ACCOUNT },
   instance = "1",
+  yearFirst,
 } = {}) {
   const requests = [];
   const loops = [];
@@ -120,6 +122,7 @@ function harness({
     saveActivity: () => saves,
     async ensureLoop(tabId) { loops.push(tabId); return "started"; },
     alarm: { start() {}, stop() {} },
+    ...(yearFirst ? { yearFirst } : {}),
   });
   /** The page loop in the AO3 tab: tick, fetch when told, wait as told. */
   async function drive({ tabId = TAB, limit = 300, until = () => false } = {}) {
@@ -138,14 +141,22 @@ const runOf = (store) => store.run;
 
 // --- Reading pages ---------------------------------------------------------------
 
-test("reads the repository's invented History page: dates as days, later rows kept and marked, required tags left out", () => {
+test("reads the repository's invented History page: dates as days, later rows kept and marked, deleted rows counted", () => {
   const html = fs.readFileSync(path.join(FIXTURES, "ao3_history.html"), "utf8");
   const read = readHistoryPage(html, "Ink_Reader_Test", 1);
   assert.equal(read.kind, "page");
   assert.equal(read.nextPage, null);
   assert.equal(read.totalPages, 1);
-  assert.equal(read.deleted, 1);
+  assert.equal(read.works.length, 10);
+  assert.equal(read.deleted, 2);
   assert.equal(read.unreadable, 0);
+  assert.equal(read.oldestDay, "2019-03-17", "how far back the page reaches");
+  const gone = '<li class="deleted reading work blurb group" role="article"><div class="user module group">' +
+    '<h4 class="viewed heading">(Deleted work, last visited 30 Dec 2025)</h4></div></li>';
+  assert.equal(readHistoryPage(page([work(1, { visited: "03 Nov 2026" }), work(2, { visited: "02 Nov 2026", later: true }), gone]), USER, 1).oldestDay,
+    "2025-12-30", "a deleted row sits in the listing by its day too");
+  assert.equal(readHistoryPage(page([work(1, { visited: "03 Nov 2026" }), work(2, { visited: "01 Nov 2026", later: true })]), USER, 1).oldestDay,
+    "2026-11-01", "and so does a row marked for later");
   assert.deepEqual(read.works.find((w) => w.id === "41000001"), {
     id: "41000001",
     title: "The Lamplighter's Ledger",
@@ -158,6 +169,15 @@ test("reads the repository's invented History page: dates as days, later rows ke
     lastVisited: "2026-10-08",
     visits: 3,
     later: false,
+    tagKinds: "wf",
+    rating: "General Audiences",
+    categories: ["Gen"],
+    complete: true,
+    language: "English",
+    kudos: 412,
+    hits: 5018,
+    updated: "2026-09-01",
+    sinceVisit: "latest",
   });
   assert.equal(read.works.find((w) => w.id === "41000002").visits, 1);
   assert.equal(read.works.find((w) => w.id === "41000004").visits, 1204);
@@ -165,6 +185,56 @@ test("reads the repository's invented History page: dates as days, later rows ke
   assert.equal(later.later, true);
   assert.equal(later.lastVisited, null, "a work marked for later carries no visit");
   assert.equal(later.visits, null);
+  assert.deepEqual(read.works.filter((w) => w.later).map((w) => w.id), ["41000009", "41000003"]);
+});
+
+test("keeps what a History row shows of a work: each tag's kind, rating, categories, complete or not, and whether it has updated", () => {
+  const read = readHistoryPage(fs.readFileSync(path.join(FIXTURES, "ao3_history.html"), "utf8"), "Ink_Reader_Test", 1);
+  const by = (id) => read.works.find((w) => w.id === id);
+  const kinds = (id) => Object.fromEntries(by(id).tags.map((tag, index) => [tag, by(id).tagKinds[index]]));
+  assert.deepEqual(kinds("41000005"), {
+    "Creator Chose Not To Use Archive Warnings": "w",
+    "Sherlock Holmes/John Watson": "r",
+    "Sherlock Holmes": "c", "John Watson": "c", "Mrs. Hudson": "c",
+    "Slow Burn": "f", "Hurt/Comfort": "f", "Friends to Lovers": "f",
+  }, "a tag's kind is the list item AO3 puts it in, never guessed from a slash");
+  assert.equal(by("41000006").tagKinds, "wrrcccff");
+  assert.equal(by("41000006").tags[2], "Elizabeth Bennet & Jane Bennet");
+  assert.equal(by("41000007").tagKinds, "wwrcccff", "every Archive Warning is a warning");
+  assert.equal(by("41000008").tagKinds, "wc");
+  assert.deepEqual(read.works.map((w) => [w.id, w.rating]), [
+    ["41000005", "Explicit"], ["41000001", "General Audiences"], ["41000009", "Explicit"], ["41000006", "Mature"],
+    ["41000007", "Teen And Up Audiences"], ["41000003", "Not Rated"], ["41000008", "Not Rated"],
+    ["41000010", "General Audiences"], ["41000002", "Teen And Up Audiences"], ["41000004", "General Audiences"],
+  ]);
+  assert.deepEqual(read.works.map((w) => w.categories), [
+    ["M/M"], ["Gen"], ["Multi"], ["F/F"], ["F/M", "Gen"], ["Gen"], ["Other"], [], ["F/M"], ["Gen"],
+  ], "every category AO3 lists; none is an empty list, not a guess");
+  assert.deepEqual(read.works.filter((w) => w.complete === false).map((w) => w.id), ["41000005", "41000009", "41000003", "41000002"]);
+  assert.equal(read.works.every((w) => typeof w.complete === "boolean"), true);
+  assert.deepEqual(read.works.filter((w) => w.sinceVisit !== "latest").map((w) => [w.id, w.sinceVisit]),
+    [["41000005", "update"], ["41000006", "edits"], ["41000002", "update"]]);
+  assert.deepEqual([by("41000005").kudos, by("41000005").hits, by("41000005").updated], [1932, 40112, "2026-11-02"]);
+  assert.deepEqual([by("41000008").kudos, by("41000008").hits, by("41000008").language], [null, 96, "Français"],
+    "AO3 shows no kudos line for a work with none");
+  assert.equal(by("41000009").sinceVisit, "latest", "a row marked for later keeps AO3's note too");
+});
+
+test("a field a row does not show, or shows in a way Trace does not know, is left out and never guessed", () => {
+  const bare = readHistoryPage(page([work(1)]), USER, 1).works[0];
+  assert.deepEqual([bare.rating, bare.categories, bare.complete, bare.language, bare.kudos, bare.hits, bare.updated],
+    ["General Audiences", null, null, null, null, null, null]);
+  assert.equal(bare.tagKinds, "f");
+  const odd = readHistoryPage(page([work(1, { tags: '<li class="warnings"><a class="tag" href="/tags/w/works">No Archive Warnings Apply</a></li>' +
+    '<li class="novelties"><a class="tag" href="/tags/n/works">A New Kind</a></li>' })]), USER, 1).works[0];
+  assert.deepEqual(odd.tags, ["No Archive Warnings Apply", "A New Kind"], "the tags are still read");
+  assert.equal(odd.tagKinds, null, "but with one kind unknown, no kind is given");
+  const twice = readHistoryPage(page([work(1, { tags: '<li class="characters"><a class="tag" href="/tags/a/works">Avery</a></li>' +
+    '<li class="freeforms"><a class="tag" href="/tags/a/works">Avery</a></li><li class="freeforms"><a class="tag" href="/tags/b/works">Brisk</a></li>' })]), USER, 1).works[0];
+  assert.deepEqual([twice.tags, twice.tagKinds], [["Avery", "Brisk"], "cf"]);
+  const hidden = readHistoryPage(page([work(1, { tags: '<li class="warnings" id="work_1_category_warnings"><strong><a href="/tags/show_hidden">Show warnings</a></strong></li>' +
+    '<li class="characters"><a class="tag" href="/tags/a/works">Avery</a></li>' })]), USER, 1).works[0];
+  assert.deepEqual([hidden.tags, hidden.tagKinds], [["Avery"], "c"], "tags the reader keeps hidden on AO3 are not read");
 });
 
 test("AO3's day reads as a calendar day; a day that does not exist, or before 2000, is left out", () => {
@@ -240,6 +310,10 @@ test("classifies AO3's answers: slow down, challenge, signed out, wrong host, re
   assert.deepEqual(classifyHistoryAnswer(answer("<html></html>", { url: "https://archiveofourown.org/users/login?return_to=x" }), USER, 1, now), { kind: "stop", code: "signed_out" });
   assert.deepEqual(classifyHistoryAnswer(answer(html, { url: "https://example.org/users/x/readings" }), USER, 1, now), { kind: "stop", code: "wrong_host" });
   assert.deepEqual(classifyHistoryAnswer(answer(html, { url: `https://archiveofourown.org/users/${USER}` }), USER, 1, now), { kind: "stop", code: "redirected" });
+  // With the History turned off, AO3 sends the reader to their own Preferences.
+  assert.deepEqual(classifyHistoryAnswer(answer("<html></html>", { url: `https://archiveofourown.org/users/${USER.toLowerCase()}/preferences` }), USER, 1, now), { kind: "stop", code: "history_off" });
+  assert.deepEqual(classifyHistoryAnswer(answer("<html></html>", { url: "https://archiveofourown.org/users/Someone_Else/preferences" }), USER, 1, now), { kind: "stop", code: "redirected" });
+  assert.deepEqual(classifyHistoryAnswer(answer("<html><form action=\"/users/login\"></form></html>", { url: `https://archiveofourown.org/users/${USER}/preferences` }), USER, 1, now), { kind: "stop", code: "signed_out" });
   assert.deepEqual(classifyHistoryAnswer({ kind: "failed", code: "timeout" }, USER, 1, now), { kind: "retry", code: "timeout", retryAfterMs: null });
   assert.equal(classifyHistoryAnswer(answer(html, { url: pageURL(1) }), USER, 1, now).kind, "page");
 });
@@ -257,6 +331,11 @@ test("a work seen again keeps its first details, the latest visit day and the hi
   assert.equal(mergeHistoryWork({ ...newer, summary: "" }, older).summary, "", "a gap stays a gap when neither has it");
   assert.equal(mergeHistoryWork({ ...newer, later: true }, { ...older, later: true }).later, true);
   assert.equal(mergeHistoryWork({ ...newer, later: true }, older).later, false, "a visit outweighs a mark for later");
+  // A work kept by an earlier version has none of the newer fields: they are filled from the later sighting, the kinds with their tags.
+  const { tagKinds, rating, categories, complete, language, kudos, hits, updated, sinceVisit, ...plain } = newer;
+  const filled = mergeHistoryWork({ ...plain, tags: [] }, { ...older, tags: ["Avery", "Brisk"], tagKinds: "cf", kudos: 9, sinceVisit: "update" });
+  assert.deepEqual([filled.tags, filled.tagKinds, filled.rating, filled.kudos, filled.sinceVisit], [["Avery", "Brisk"], "cf", "General Audiences", 9, "update"]);
+  assert.equal(mergeHistoryWork(plain, { ...older, tags: ["Avery"], tagKinds: "c" }).tagKinds, null, "kinds never join tags they were not read with");
 });
 
 test("the IndexedDB store keeps a page's works and the run together, and they outlast the connection", async () => {
@@ -330,6 +409,57 @@ test("the view says how far it has got and about how long is left, never the AO3
   const text = JSON.stringify(view);
   assert.doesNotMatch(text, new RegExp(USER));
   assert.doesNotMatch(text, /Secret title/);
+});
+
+test("the year can be reviewed first only on a computer, while it reads, once a row from before 1 January is kept", async () => {
+  const november = Date.parse("2026-11-10T12:00:00");
+  assert.equal(yearFirstDay(november), "2026-01-01");
+  assert.equal(yearFirstDay(Date.parse("2027-01-31T23:00:00")), "2026-01-01", "in January the year looked back on is last year");
+  assert.equal(yearFirstDay(Date.parse("2027-02-01T00:00:00")), "2027-01-01");
+  const answers = () => [
+    ok([work(1, { visited: "03 Nov 2026" }), work(2, { visited: "01 Jan 2026" })], 2, { last: 3 }),
+    ok([work(3, { visited: "01 Jan 2026" }), work(4, { visited: "31 Dec 2025", later: true })], 3, { last: 3 }),
+    ok([work(5, { visited: "02 Feb 2024" })]),
+  ];
+  const h = harness({ answers: answers(), clock: fakeClock(november), yearFirst: async () => true });
+  await h.history.start(USER, TAB);
+  await h.drive({ until: () => h.store.run.counts.pages === 1 });
+  assert.deepEqual([(await h.history.view()).through, (await h.history.view()).yearFirst], ["2026-01-01", null],
+    "1 January itself may run on to the next page");
+  await h.drive({ until: () => h.store.run.counts.pages === 2 });
+  assert.deepEqual([(await h.history.view()).through, (await h.history.view()).yearFirst], ["2025-12-31", "2026-01-01"],
+    "a row marked for later counts: it sits in the listing by its day too");
+  await h.history.pause();
+  assert.equal((await h.history.view()).yearFirst, null, "a paused run offers what it found, as before");
+  await h.history.resume(TAB);
+  assert.equal((await h.drive()).stop, true);
+  const done = await h.history.view();
+  assert.deepEqual([done.status, done.through, done.yearFirst], ["finished", "2024-02-02", null]);
+
+  // Nothing opened this year: there is no year to review, however far back the read has got.
+  const quiet = harness({ answers: [ok([work(6, { visited: "30 Dec 2025" }), work(7, { visited: "04 Jun 2026", later: true })], 2), ok([work(8, { visited: "01 Dec 2025" })])],
+    clock: fakeClock(november), yearFirst: async () => true });
+  await quiet.history.start(USER, TAB);
+  await quiet.drive({ until: () => quiet.store.run.counts.pages === 1 });
+  assert.deepEqual([(await quiet.history.view()).through, (await quiet.history.view()).yearFirst], ["2025-12-30", null]);
+
+  // A visited work whose day could not be read might belong to the year: the year is not offered without it.
+  const undated = harness({ answers: [ok([work(9, { visited: "03 Nov 2026" }), work(10, { visited: "about 2 hours ago" })], 2), ok([work(11, { visited: "01 Dec 2025" })], 3), ok([work(12, { visited: "01 Nov 2025" })])],
+    clock: fakeClock(november), yearFirst: async () => true });
+  await undated.history.start(USER, TAB);
+  await undated.drive({ until: () => undated.store.run.counts.pages === 2 });
+  assert.deepEqual([(await undated.history.view()).through, (await undated.history.view()).yearFirst], ["2025-12-01", null]);
+
+  // A run an earlier version began never kept how far back it had read.
+  const { through: _through, newest: _newest, ...older } = h.store.run;
+  const upgraded = harness({ answers: [], clock: fakeClock(november), yearFirst: async () => true });
+  upgraded.store.run = { ...older, status: "running", reason: null };
+  assert.deepEqual([(await upgraded.history.view()).status, (await upgraded.history.view()).yearFirst], ["running", null]);
+
+  const phone = harness({ answers: answers(), clock: fakeClock(november) });
+  await phone.history.start(USER, TAB);
+  await phone.drive({ until: () => phone.store.run.counts.pages === 2 });
+  assert.deepEqual([(await phone.history.view()).through, (await phone.history.view()).yearFirst], ["2025-12-31", null]);
 });
 
 test("a work on two pages is kept once, with the counts saying so", async () => {
@@ -512,7 +642,7 @@ test("an unknown account (a background still starting) keeps the run", async () 
 
 // --- Safari wiring -------------------------------------------------------------------
 
-function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult = () => "started", permitted = true, handOff, webHistory } = {}) {
+function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult = () => "started", permitted = true, handOff, webHistory, reviewOnWeb } = {}) {
   const listeners = [];
   const scripts = [];
   const cleanups = [];
@@ -531,6 +661,7 @@ function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult =
     saveActivity: () => ({ inFlight: 0, lastEndedAt: 0 }),
     ...(handOff ? { handOffHistory: handOff } : {}),
     ...(webHistory ? { webHistory } : {}),
+    ...(reviewOnWeb ? { reviewOnWeb } : {}),
   });
   const send = (message, sender) => new Promise((resolve) => {
     for (const listener of listeners) {
@@ -664,7 +795,8 @@ test("a History of 10,000 works is read and kept in IndexedDB, far past the old 
 test("Review in Trace hands over what the run found, finished or paused, and nothing before", async () => {
   const handed = [];
   const handoff = { ok: true, state: "ready_to_open", handoffID: "00000000-0000-4000-8000-000000000002", expiresAtMs: Date.now() + 60_000 };
-  const w = wiring({ handOff: async (build) => { handed.push(await build()); return handoff; } });
+  const coverage = [];
+  const w = wiring({ handOff: async (build, about) => { handed.push(await build()); coverage.push(about); return handoff; } });
   const review = () => w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP);
   const empty = wiring({ handOff: async () => handoff });
   assert.equal((await empty.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP)).error, "review_not_ready", "no run yet");
@@ -681,6 +813,15 @@ test("Review in Trace hands over what the run found, finished or paused, and not
   assert.equal(reply.ok, true, JSON.stringify(reply));
   assert.deepEqual(reply.handoff, { handoffID: handoff.handoffID, expiresAtMs: handoff.expiresAtMs });
   assert.equal(handed[0].itemCount, 2, "the works it found so far");
+  assert.deepEqual(coverage[0], { complete: false, since: null, through: null, deleted: 0, unreadable: 0, started: "1970-01-01T00:00:00.000Z" },
+    "and that it is not the whole History; a run begun by an earlier version does not know how far back it reached");
+  w.store.run = { ...w.store.run, status: "finished", reason: "reached_last_page", through: "2026-10-08",
+    counts: { ...w.store.run.counts, deleted: 3, unreadable: 1 } };
+  const whole = wiring({ handOff: async (build, about) => { await build(); coverage.push(about); return handoff; } });
+  whole.store.run = w.store.run;
+  whole.store.works.set("1", w.store.works.get("1"));
+  await whole.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP);
+  assert.deepEqual(coverage[1], { complete: true, since: null, through: "2026-10-08", deleted: 3, unreadable: 1, started: "1970-01-01T00:00:00.000Z" });
   const refused = wiring({ handOff: async () => ({ ok: false, error: "not_authenticated" }) });
   refused.store.run = { ...w.store.run, status: "finished", reason: "reached_last_page" };
   refused.store.works.set("1", w.store.works.get("1"));
@@ -725,4 +866,53 @@ test("on a computer, Review in Trace opens Trace's review page, which only Trace
   assert.equal(asked.length, 1, "only Trace's own page was answered");
   await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "delete", tabId: TAB }, POPUP);
   assert.equal(discarded, 1, "a deleted History is no longer offered");
+});
+
+test("on a computer, while it reads on, the year's stories are handed over on their own, and said to be", async () => {
+  const handoffID = "00000000-0000-4000-8000-0000000000ab";
+  const url = `https://www.tracefiction.test/import/history#handoff=${handoffID}`;
+  const handed = [];
+  const run = (through) => ({
+    v: 1, runId: "r", account: ACCOUNT, user: USER, status: "running", reason: null, tabId: TAB, nextPage: 3, totalPages: 9,
+    lastPageDigest: null, through, newest: `${new Date().getFullYear()}-12-31`, inFlight: null, counts: { pages: 2, works: 4, later: 1, deleted: 2, unreadable: 0, repeats: 0 },
+    timing: { startedAt: 0, finishedAt: null, pausedAt: null, pausedMs: 0, dueAt: Date.now() + 60_000, gapMs: 6_000, lastKeptAt: null, keptGapMsTotal: 0, keptGapCount: 0 },
+    retry: { consecutive: 0, code: null },
+  });
+  const thisYear = new Date().getFullYear() - (new Date().getMonth() === 0 ? 1 : 0);
+  const rows = [work(1, { visited: `03 Nov ${thisYear}` }), work(2, { visited: `01 Jan ${thisYear}` }),
+    work(3, { visited: `31 Dec ${thisYear - 1}` }), work(4, { visited: `05 Jun ${thisYear}`, later: true })];
+  const computer = (through, result) => {
+    const w = wiring({ reviewOnWeb: async () => true,
+      handOff: async (build, about) => { handed.push({ history: await build(), about }); return result ?? { ok: true, state: "opened_on_web", handoffID, expiresAtMs: Date.now() + 60_000, url }; } });
+    w.store.run = run(through);
+    for (const kept of readHistoryPage(page(rows), USER, 1).works) w.store.works.set(kept.id, kept);
+    return w;
+  };
+  const year = (w) => w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review_year", tabId: TAB }, POPUP);
+
+  const early = computer(`${thisYear}-01-01`);
+  assert.equal((await early.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "status", tabId: TAB }, POPUP)).view.yearFirst, null);
+  assert.equal((await year(early)).error, "review_not_ready", "not before the read has passed 1 January");
+
+  const passed = computer(`${thisYear - 1}-12-31`);
+  assert.equal((await passed.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "status", tabId: TAB }, POPUP)).view.yearFirst, `${thisYear}-01-01`);
+  const reply = await year(passed);
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.equal(reply.handoff.url, url);
+  assert.equal(reply.view.status, "running", "the read carries on");
+  const { history, about } = handed.at(-1);
+  const items = history.parts.flatMap((part) => JSON.parse(new TextDecoder().decode(part)).items);
+  assert.deepEqual(items.map((item) => item.u.split("/").pop()), ["1", "2"],
+    "only the stories last visited this year: none older, none only marked for later");
+  assert.deepEqual(about, { complete: false, since: `${thisYear}-01-01`, through: `${thisYear - 1}-12-31`, deleted: 2, unreadable: 0,
+    started: "1970-01-01T00:00:00.000Z" });
+  assert.equal((await passed.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP)).error, "review_not_ready",
+    "the whole History still waits for the read to finish");
+
+  const phone = wiring({ handOff: async () => { throw new Error("never asked"); } });
+  phone.store.run = run(`${thisYear - 1}-12-31`);
+  assert.equal((await year(phone)).error, "review_not_ready", "the app takes a History as a whole");
+
+  const failed = await year(computer(`${thisYear - 1}-12-31`, { ok: false, error: "history_handoff_unavailable" }));
+  assert.deepEqual([failed.error, failed.web], ["history_handoff_unavailable", true], "the sheet is told it was for Trace's page, not the app");
 });

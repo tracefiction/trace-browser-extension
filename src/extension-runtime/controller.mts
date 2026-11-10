@@ -154,7 +154,7 @@ import {
 
 import { NativeLibraryImportProducer } from "./native-import.mjs";
 import type { HistoryHandoffResult, HistoryParts, NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
-import type { WebHistoryAnswer, WebHistoryHandoff, WebHistoryOffer } from "./web-history-handoff.mjs";
+import type { HistoryCoverage, WebHistoryAnswer, WebHistoryHandoff, WebHistoryOffer } from "./web-history-handoff.mjs";
 import {
   FfnSummaryFill,
   LOCAL_STATE_TTL_MS,
@@ -1492,10 +1492,12 @@ export class SessionRuntimeController {
    * to the app through the paired History inbox, fenced to the account as
    * the import handoff is; on a computer, to Trace's review page, which asks
    * for it a part at a time (`answerWebHistory`). `build` makes the parts
-   * only once the account is known to be connected.
+   * only once the account is known to be connected; `coverage` says how
+   * much of the History they hold, and is told to the review page.
    */
   async handOffHistory(
     build: () => Promise<HistoryParts | null>,
+    coverage: HistoryCoverage | null = null,
   ): Promise<HistoryHandoffResult | WebHistoryOffer | { readonly ok: false; readonly error: "not_authenticated" }> {
     await this.start();
     const unavailable = Object.freeze({ ok: false, error: "history_handoff_unavailable" } as const);
@@ -1510,7 +1512,7 @@ export class SessionRuntimeController {
       const history = await build().catch(() => null);
       if (history === null) return unavailable;
       const fenced = await this.#service.executeCurrentScope(async (scope, isCurrent) =>
-        await isCurrent() ? web.offer(scope.accountId, history) : unavailable);
+        await isCurrent() ? web.offer(scope.accountId, history, coverage) : unavailable);
       if (fenced.kind !== "published") {
         await web.discard();
         return unavailable;
@@ -1518,7 +1520,8 @@ export class SessionRuntimeController {
       return fenced.value;
     }
     const producer = this.#nativeHistory;
-    if (producer === null || !this.#nativeImportEnabled || platform !== "ios") return unavailable;
+    // The app's inbox takes a History as a whole: a year on its own is only for the review page.
+    if (producer === null || !this.#nativeImportEnabled || platform !== "ios" || coverage?.since != null) return unavailable;
     const preparation = await this.#prepareNativeAuthority();
     if (!preparation.ready || this.snapshot().state !== "connected") {
       return Object.freeze({ ok: false, error: "not_authenticated" } as const);
@@ -1536,6 +1539,14 @@ export class SessionRuntimeController {
       return unavailable;
     }
     return fenced.value;
+  }
+
+  /** Whether Review in Trace opens Trace's review page here (a computer), not the app. */
+  async historyReviewOnWeb(): Promise<boolean> {
+    await this.start();
+    const site = new URL(this.#webOrigin);
+    return this.#webHistory !== null && await this.#nativePlatform() === "desktop" &&
+      declaresHostPattern(this.#runtime, `${site.protocol}//${site.hostname}/*`);
   }
 
   /** A Trace page's request for the History on offer, answered only for the account signed in now. */

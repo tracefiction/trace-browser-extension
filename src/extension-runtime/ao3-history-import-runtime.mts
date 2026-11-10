@@ -16,12 +16,13 @@ import {
 import {
   AO3_USERNAME_PATTERN,
   MAX_HISTORY_PAGE_CHARS,
+  type HistoryWork,
   type LoadFailCode,
   type LoadedPage,
 } from "./ao3-history-page.mjs";
 import { IndexedDbHistoryStore, MemoryHistoryStore, type HistoryStore } from "./ao3-history-store.mjs";
 import { historyParts, type HistoryHandoffResult, type HistoryParts } from "./native-history-handoff.mjs";
-import { WEB_HISTORY_RECEIVED, WEB_HISTORY_REQUEST, type WebHistoryAnswer, type WebHistoryOffer } from "./web-history-handoff.mjs";
+import { WEB_HISTORY_RECEIVED, WEB_HISTORY_REQUEST, type HistoryCoverage, type WebHistoryAnswer, type WebHistoryOffer } from "./web-history-handoff.mjs";
 
 export const AO3_HISTORY_IMPORT_ALARM = "trace-ao3-history-import";
 const AO3_SITE_PATTERN = "https://*.archiveofourown.org/*";
@@ -36,8 +37,9 @@ const AO3_SITE_PATTERN = "https://*.archiveofourown.org/*";
  *
  * It also draws the reading bar at the foot of the page from the run's view
  * that comes with each reply: how far the run has got, with Pause, and what
- * happened when it stops. The bar lives in its own shadow root, so AO3's
- * styles and Trace's never meet. It shows only counts, never a work.
+ * happened when it stops, and when a year's stories can be reviewed before
+ * the rest is read. The bar lives in its own shadow root, so AO3's styles and
+ * Trace's never meet. It shows only counts, never a work.
  */
 export function ao3HistoryLoopInTab(message: string, maxChars: number, timeoutMs: number): unknown {
   const scope = globalThis as unknown as Record<string, unknown>;
@@ -144,14 +146,20 @@ export function ao3HistoryLoopInTab(message: string, maxChars: number, timeoutMs
     let line = "";
     if (v.status === "running") {
       const page = total === null ? read + 1 : Math.min(read + 1, total);
+      const ofTotal = `${page}${total === null ? "" : ` of ${total}`}`;
       const waiting = v.waitingFor;
+      // Once the read has passed 1 January, that year can be reviewed while the rest is read.
+      const year = typeof v.yearFirst === "string" && /^\d{4}-01-01$/.test(v.yearFirst) ? v.yearFirst.slice(0, 4) : null;
+      if (year !== null) title = `Your ${year} stories are ready`;
       line = waiting === "slow_down"
         ? "AO3 asked Trace to slow down. Trying again soon."
         : waiting === "ao3_unwell"
           ? "AO3 isn't answering. Trace will try again shortly."
           : waiting === "network"
             ? "No connection. Trace will try again shortly."
-            : `Page ${page}${total === null ? "" : ` of ${total}`} · ${plural(works, "story", "stories")}`;
+            : year !== null
+              ? `Open Trace to review them. Still reading: page ${ofTotal}.`
+              : `Page ${ofTotal} · ${plural(works, "story", "stories")}`;
       buttonAction = "pause";
     } else if (v.status === "paused") {
       title = "Paused";
@@ -318,6 +326,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timeout">
   });
 }
 
+/** The works last visited on or after `since`; all of them when it is null. */
+export function worksSince(works: readonly HistoryWork[], since: string | null): readonly HistoryWork[] {
+  return since === null ? works : works.filter((work) => work.lastVisited !== null && work.lastVisited >= since);
+}
+
 function randomToken(): string {
   const bytes = new Uint8Array(12);
   globalThis.crypto.getRandomValues(bytes);
@@ -340,11 +353,15 @@ export interface HistoryImportEnvironment {
   readonly saveActivity: () => { readonly inFlight: number; readonly lastEndedAt: number };
   /**
    * Hands the History to the Trace app for review (the controller's
-   * `handOffHistory`): `build` makes its parts once the account is confirmed.
+   * `handOffHistory`): `build` makes its parts once the account is confirmed,
+   * and `coverage` says how much of the History they hold.
    */
   readonly handOffHistory?: (
     build: () => Promise<HistoryParts | null>,
+    coverage: HistoryCoverage,
   ) => Promise<HistoryHandoffResult | WebHistoryOffer | { readonly ok: false; readonly error: "not_authenticated" }>;
+  /** Whether Review in Trace opens Trace's review page here (a computer), not the app. */
+  readonly reviewOnWeb?: () => Promise<boolean>;
   /**
    * On a computer: Trace's own site, whose review page asks for the History
    * a part at a time (the controller's `answerWebHistory`).
@@ -382,7 +399,13 @@ export type SheetReply =
       /** `url`: Trace's review page, on a computer; absent on iPhone, where the app opens. */
       readonly handoff?: { readonly handoffID: string; readonly expiresAtMs: number; readonly url?: string };
     }
-  | { readonly ok: false; readonly error: SheetError; readonly view?: HistoryRunView };
+  | {
+      readonly ok: false;
+      readonly error: SheetError;
+      readonly view?: HistoryRunView;
+      /** A handoff that failed was for Trace's review page (a computer), not the app. */
+      readonly web?: boolean;
+    };
 
 export function installAo3HistoryImport(environment: HistoryImportEnvironment): Ao3HistoryImport {
   const { runtime, tabs, scripting, permissions, alarms, storageMode } = environment;
@@ -433,6 +456,7 @@ export function installAo3HistoryImport(environment: HistoryImportEnvironment): 
     newId: randomToken,
     account: environment.account,
     saveActivity: environment.saveActivity,
+    ...(environment.reviewOnWeb === undefined ? {} : { yearFirst: environment.reviewOnWeb }),
     async ensureLoop(sourceTabId) {
       const tab = await ao3Tab(sourceTabId);
       if (typeof tab === "string") return "failed";
@@ -498,16 +522,26 @@ export function installAo3HistoryImport(environment: HistoryImportEnvironment): 
         await environment.webHistory?.discard().catch(() => undefined);
         return { ok: true, view: await history.delete() };
       }
-      case "review": {
-        // What the run has found, finished or paused part way, for review in Trace.
+      case "review":
+      case "review_year": {
+        // What the run has found, finished or paused part way, for review in
+        // Trace; or, while it reads on, the year it has already passed.
         const view = await history.view();
-        if ((view.status !== "finished" && view.status !== "paused") || view.works === 0) {
-          return { ok: false, error: "review_not_ready", view };
-        }
+        const since = message.action === "review_year" ? view.yearFirst : null;
+        const ready = message.action === "review_year"
+          ? since !== null
+          : view.status === "finished" || view.status === "paused";
+        if (!ready || view.works === 0) return { ok: false, error: "review_not_ready", view };
         if (environment.handOffHistory === undefined) return { ok: false, error: "history_handoff_unavailable", view };
-        const result = await environment.handOffHistory(async () =>
-          historyParts(await history.works(), new Date().toISOString()));
-        if (!result.ok) return { ok: false, error: result.error, view };
+        const result = await environment.handOffHistory(
+          async () => historyParts(worksSince(await history.works(), since), new Date().toISOString()),
+          { complete: view.status === "finished", since, through: view.through, deleted: view.deleted, unreadable: view.unreadable,
+            started: view.startedAt === null ? null : new Date(view.startedAt).toISOString() },
+        );
+        if (!result.ok) {
+          const web = await (environment.reviewOnWeb?.() ?? Promise.resolve(false)).catch(() => false);
+          return { ok: false, error: result.error, view, web };
+        }
         // On a computer the sheet opens Trace's review page at `url`.
         return result.state === "opened_on_web"
           ? { ok: true, view, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs, url: result.url } }

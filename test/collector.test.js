@@ -9455,14 +9455,21 @@ test("AO3 History rows carry the last-visited date and visit count", () => {
   const { collect } = createCollectorBindings(dom);
   const res = plainJson(collect());
   assert.equal(res.source, "ao3");
-  // The deleted-work row has no work id and is skipped.
+  // The deleted-work rows have no work id and are skipped.
   assert.deepEqual(res.items.map((i) => i.u), [
+    "https://archiveofourown.org/works/41000005",
     "https://archiveofourown.org/works/41000001",
-    "https://archiveofourown.org/works/41000002",
+    "https://archiveofourown.org/works/41000009",
+    "https://archiveofourown.org/works/41000006",
+    "https://archiveofourown.org/works/41000007",
     "https://archiveofourown.org/works/41000003",
+    "https://archiveofourown.org/works/41000008",
+    "https://archiveofourown.org/works/41000010",
+    "https://archiveofourown.org/works/41000002",
     "https://archiveofourown.org/works/41000004",
   ]);
-  const [ledger, letter, fog, rain] = res.items;
+  const [ledger, letter, fog, rain] = ["41000001", "41000002", "41000003", "41000004"]
+    .map((id) => res.items.find((i) => i.u.endsWith(id)));
   assert.equal(ledger.ctx, "listing");
   assert.equal(ledger.t, "The Lamplighter's Ledger");
   assert.equal(ledger.lv, "2026-10-08");
@@ -9483,7 +9490,7 @@ test("AO3 Marked for Later and ordinary listings carry no visit fields", () => {
     "https://archiveofourown.org/users/Ink_Reader_Test/readings?show=to-read",
   );
   const laterItems = plainJson(createCollectorBindings(later).collect().items);
-  assert.equal(laterItems.length, 4);
+  assert.equal(laterItems.length, 10);
   assert.ok(laterItems.every((i) => !("lv" in i) && !("vc" in i)));
 
   const listing = domFromFixture(
@@ -9491,7 +9498,7 @@ test("AO3 Marked for Later and ordinary listings carry no visit fields", () => {
     "https://archiveofourown.org/tags/Sherlock%20Holmes/works",
   );
   const listingItems = plainJson(createCollectorBindings(listing).collect().items);
-  assert.equal(listingItems.length, 4);
+  assert.equal(listingItems.length, 10);
   assert.ok(listingItems.every((i) => !("lv" in i) && !("vc" in i)));
 
   const bookmarks = domFromFixture(

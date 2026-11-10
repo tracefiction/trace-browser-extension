@@ -37,6 +37,25 @@ test("a History work becomes an Import listing item with its History fields", ()
   assert.equal("lv" in later || "vc" in later, false, "a work marked for later carries no visit");
 });
 
+test("a work read with its newer fields carries them under the listing's own keys, and the tags as before", () => {
+  const read = work(4, {
+    tags: ["No Archive Warnings Apply", "Avery/Brisk", "Avery", "Found Family"], tagKinds: "wrcf",
+    rating: "Teen And Up Audiences", categories: ["F/M", "Gen"], complete: false, language: "English",
+    kudos: 412, hits: 5_018, updated: "2026-09-01", sinceVisit: "update",
+  });
+  assert.deepEqual(historyImportItem(read), {
+    src: "ao3", ctx: "listing", u: "https://archiveofourown.org/works/4", t: "Synthetic work 4 café 📚",
+    a: "Synthetic_Quill", fms: ["Invented Lanterns"], tags: ["No Archive Warnings Apply", "Avery/Brisk", "Avery", "Found Family"],
+    tk: "wrcf", sm: "Invented summary 4.", r: "Teen And Up Audiences", cat: ["F/M", "Gen"], l: "English",
+    w: 12_345, chPub: 3, cht: 3, s: "wip", k: 412, h: 5_018, upd: "2026-09-01", ver: "update", lv: "2026-10-08", vc: 3,
+  }, "AO3's own symbol says whether it is complete");
+  const none = historyImportItem(work(5, { tagKinds: null, rating: null, categories: [], complete: null, language: null,
+    kudos: null, hits: null, updated: null, sinceVisit: null }));
+  assert.deepEqual(Object.keys(none).sort(), ["a", "cat", "chPub", "cht", "ctx", "fms", "lv", "s", "sm", "src", "t", "tags", "u", "vc", "w"],
+    "a field that was not read is left out; no category is an empty list");
+  assert.equal("tk" in historyImportItem(work(6, { tags: ["Avery", "Brisk"], tagKinds: "c" })), false, "kinds that do not match the tags are not sent");
+});
+
 test("the History is cut into bounded parts, newest visit first, with the digest of the whole", async () => {
   const works = Array.from({ length: 2_500 }, (_, index) => work(index + 1, {
     lastVisited: `2026-${String((index % 12) + 1).padStart(2, "0")}-01`,

@@ -32,6 +32,30 @@ export interface HistoryWork {
   readonly visits: number | null;
   /** The row is "Marked for Later": an intent to read, not a read. */
   readonly later: boolean;
+  // What follows is absent from a work kept by a version that did not read
+  // it, and null when the row did not show it or it could not be read.
+  /**
+   * The kind of each of `tags`, one letter a tag in the same order: `w` an
+   * Archive Warning, `r` a relationship, `c` a character, `f` an additional
+   * tag. Null when any tag's kind could not be told.
+   */
+  readonly tagKinds?: string | null;
+  /** AO3's rating, as its symbol words it: "Teen And Up Audiences". */
+  readonly rating?: string | null;
+  /** AO3's categories ("F/M", "Gen"); empty when the work has none. */
+  readonly categories?: readonly string[] | null;
+  /** AO3's own Complete Work or Work in Progress symbol. */
+  readonly complete?: boolean | null;
+  readonly language?: string | null;
+  readonly kudos?: number | null;
+  readonly hits?: number | null;
+  /** The day the work was last updated, `YYYY-MM-DD`. */
+  readonly updated?: string | null;
+  /**
+   * AO3's note after the visit day: the work is as the reader last saw it,
+   * has had minor edits since, or has an update they have not opened.
+   */
+  readonly sinceVisit?: "latest" | "edits" | "update" | null;
 }
 
 export type HistoryPageRead =
@@ -46,6 +70,12 @@ export type HistoryPageRead =
       readonly nextPage: number | null;
       /** The highest page number the page links show, at least this page. */
       readonly totalPages: number;
+      /**
+       * The earliest last-visited day any row on the page shows, rows marked
+       * for later and deleted rows included. AO3 lists the History newest
+       * visit first, so this is how far back the page reaches.
+       */
+      readonly oldestDay: string | null;
     }
   /**
    * A History page with no works listed at all. Never taken for the last
@@ -63,6 +93,7 @@ export type HistoryStopCode =
   | "forbidden"
   | "wrong_host"
   | "redirected"
+  | "history_off"
   | "unrecognized_page"
   | "pagination_unexpected"
   | "rows_unreadable"
@@ -153,7 +184,52 @@ export function historyDay(text: string): string | null {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
-function readRow(row: string, startTag: string): HistoryWork | "deleted" | "unreadable" {
+const TAG_KINDS: Readonly<Record<string, string>> = { warnings: "w", relationships: "r", characters: "c", freeforms: "f" };
+
+/**
+ * The kind of each of `tags`, from the class of the list item AO3 puts each
+ * tag in. Null unless every tag is found, in the same order, in an item of a
+ * known kind.
+ */
+function tagKinds(list: string, tags: readonly string[]): string | null {
+  let kinds = "";
+  const item = /<li\b[^>]*>([\s\S]*?)<\/li\s*>/gi;
+  for (let match = item.exec(list); match !== null && kinds.length < tags.length; match = item.exec(list)) {
+    const kind = classTokens(match[0].slice(0, match[0].indexOf(">") + 1))
+      .map((token) => (Object.hasOwn(TAG_KINDS, token) ? TAG_KINDS[token] : undefined)).find(Boolean);
+    for (const text of anchorTexts(match[1] ?? "", (tag) => classTokens(tag).includes("tag"), 75)) {
+      if (kinds.length === tags.length) break;
+      const at = tags.indexOf(text);
+      // A tag listed twice keeps the kind of its first place, as `tags` keeps it once.
+      if (at !== -1 && at < kinds.length) continue;
+      if (kind === undefined || at !== kinds.length) return null;
+      kinds += kind;
+    }
+  }
+  return kinds.length === tags.length ? kinds : null;
+}
+
+/** The symbol in a row's required tags that carries the class `token`: its classes and its title. */
+function symbol(required: string, token: string): { readonly classes: readonly string[]; readonly title: string } | null {
+  const span = /<span\b[^>]*>/gi;
+  for (let match = span.exec(required); match !== null; match = span.exec(required)) {
+    const classes = classTokens(match[0]);
+    if (classes.includes(token)) return { classes, title: (attribute(match[0], "title") ?? "").replace(/\s+/g, " ").trim().slice(0, 200) };
+  }
+  return null;
+}
+
+/** The visit line of a row, as text. */
+function visitLine(row: string): string {
+  return plainText(elements(row, "h4", ["viewed"], 1)[0] ?? "", 500);
+}
+
+/** The last-visited day a visit line shows; a deleted row words it "(Deleted work, last visited …)". */
+function visitDay(viewed: string): string | null {
+  return historyDay(/[Ll]ast visited:?\s*(\d{1,2} [A-Z][a-z]{2} \d{4})/.exec(viewed)?.[1] ?? "");
+}
+
+function readRow(row: string, startTag: string, viewed: string): HistoryWork | "deleted" | "unreadable" {
   const classes = classTokens(startTag);
   if (classes.includes("deleted")) return "deleted";
   const id = /\bid\s*=\s*["']work_([1-9]\d{0,11})["']/i.exec(startTag)?.[1];
@@ -167,9 +243,7 @@ function readRow(row: string, startTag: string): HistoryWork | "deleted" | "unre
   if (href === null || !new RegExp(`^(?:https://archiveofourown\\.org)?/works/${id}(?:[/?#]|$)`).test(href) || !title) {
     return "unreadable";
   }
-  const viewed = plainText(elements(row, "h4", ["viewed"], 1)[0] ?? "", 500);
   const later = /\(Marked for Later\.\)/i.test(viewed);
-  const visited = later ? null : /Last visited:\s*(\d{1,2} [A-Z][a-z]{2} \d{4})/.exec(viewed)?.[1] ?? null;
   const visits = later
     ? null
     : /\bVisited once\b/i.test(viewed)
@@ -178,18 +252,43 @@ function readRow(row: string, startTag: string): HistoryWork | "deleted" | "unre
   const words = wholeNumber(plainText(elements(row, "dd", ["words"], 1)[0] ?? "", 40));
   // "<a>6</a>/6" reads as "6 /6": the count has no spaces of its own.
   const chapters = plainText(elements(row, "dd", ["chapters"], 1)[0] ?? "", 40).replace(/\s+/g, "");
+  const tagList = elements(row, "ul", ["tags", "commas"], 1)[0] ?? "";
+  const tags = anchorTexts(tagList, (tag) => classTokens(tag).includes("tag"), 75);
+  // The four symbols beside the title: rating, warnings, category, complete.
+  const required = elements(row, "ul", ["required-tags"], 1)[0] ?? "";
+  const category = symbol(required, "category");
+  const progress = symbol(required, "iswip");
   return {
     id,
     title,
     authors: anchorTexts(heading, (tag) => attribute(tag, "rel") === "author", 20),
     fandoms: anchorTexts(elements(row, "h5", ["fandoms"], 1)[0] ?? "", (tag) => classTokens(tag).includes("tag"), 20),
-    tags: anchorTexts(elements(row, "ul", ["tags", "commas"], 1)[0] ?? "", (tag) => classTokens(tag).includes("tag"), 75),
+    tags,
     summary: plainText(elements(row, "blockquote", ["summary"], 1)[0] ?? "", 4_000),
     words,
     chapters: /^\d+\/(?:\d+|\?)$/.test(chapters) ? chapters : null,
-    lastVisited: visited === null ? null : historyDay(visited),
+    lastVisited: later ? null : visitDay(viewed),
     visits: visits !== null && visits > 0 ? visits : null,
     later,
+    tagKinds: tagKinds(tagList, tags),
+    rating: symbol(required, "rating")?.title || null,
+    categories: category === null
+      ? null
+      : category.classes.includes("category-none")
+        ? []
+        : category.title.split(/\s*,\s*/).filter(Boolean).slice(0, 10),
+    complete: progress === null
+      ? null
+      : progress.classes.includes("complete-yes") ? true : progress.classes.includes("complete-no") ? false : null,
+    language: plainText(elements(row, "dd", ["language"], 1)[0] ?? "", 60) || null,
+    kudos: wholeNumber(plainText(elements(row, "dd", ["kudos"], 1)[0] ?? "", 40)),
+    hits: wholeNumber(plainText(elements(row, "dd", ["hits"], 1)[0] ?? "", 40)),
+    updated: historyDay(plainText(elements(row, "p", ["datetime"], 1)[0] ?? "", 40)),
+    sinceVisit: /\(Update available\.\)/i.test(viewed)
+      ? "update"
+      : /\(Minor edits made since then\.\)/i.test(viewed)
+        ? "edits"
+        : /\(Latest version\.\)/i.test(viewed) ? "latest" : null,
   };
 }
 
@@ -258,9 +357,13 @@ export function readHistoryPage(html: string, user: string, page: number): Histo
   const works: HistoryWork[] = [];
   let deleted = 0;
   let unreadable = 0;
+  let oldestDay: string | null = null;
   starts.forEach((start, index) => {
     const row = list.slice(start.index + start.tag.length, starts[index + 1]?.index ?? list.length);
-    const read = readRow(row, start.tag);
+    const viewed = visitLine(row);
+    const day = visitDay(viewed);
+    if (day !== null && (oldestDay === null || day < oldestDay)) oldestDay = day;
+    const read = readRow(row, start.tag, viewed);
     if (read === "deleted") deleted += 1;
     else if (read === "unreadable") unreadable += 1;
     else works.push(read);
@@ -310,7 +413,7 @@ export function readHistoryPage(html: string, user: string, page: number): Histo
   const nextPage = nexts.size ? page + 1 : null;
   // A last page is the last, whatever stale links it shows.
   const totalPages = nextPage === null ? page : Math.max(highest, nextPage);
-  return { kind: "page", works, deleted, unreadable, nextPage, totalPages };
+  return { kind: "page", works, deleted, unreadable, nextPage, totalPages, oldestDay };
 }
 
 // --- Classifying an answer -----------------------------------------------------
@@ -378,7 +481,11 @@ export function classifyHistoryAnswer(answer: LoadedPage, user: string, page: nu
   if (answer.status === 403) return { kind: "stop", code: LOGIN_MARKERS.test(answer.html) ? "signed_out" : "forbidden" };
   if (answer.status !== 200) return { kind: "stop", code: "http_error" };
   if (historyPageNumber(answer.url, user) !== page) {
-    return { kind: "stop", code: LOGIN_MARKERS.test(answer.html) ? "signed_out" : "redirected" };
+    if (LOGIN_MARKERS.test(answer.html)) return { kind: "stop", code: "signed_out" };
+    // With the History turned off, AO3 answers a History page by sending the
+    // reader to their own Preferences, where it can be turned on.
+    const off = landed.pathname.replace(/\/$/, "").toLowerCase() === `/users/${user}/preferences`.toLowerCase();
+    return { kind: "stop", code: off ? "history_off" : "redirected" };
   }
   if (answer.contentType !== null && !/text\/html/i.test(answer.contentType)) return { kind: "stop", code: "unrecognized_page" };
   const read = readHistoryPage(answer.html, user, page);

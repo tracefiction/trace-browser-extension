@@ -40,8 +40,13 @@ standard Base64 of one UTF-8 JSON document `{s:"ao3-history", at, items}` of
 at most 393,216 bytes and 1,000 items, each an AO3 listing item
 (`src:"ao3"`, `ctx:"listing"`, `u` an `https://archiveofourown.org/works/<id>`
 address, a title `t`, and the History fields `lv` (day), `vc` (visits) or
-`ml:true` (marked for later, never with `lv`)). The inbox checks each part as
-it arrives. Parts may arrive in any order; the same part again is accepted,
+`ml:true` (marked for later, never with `lv`)). An item also carries what
+else its History row showed, each only when it was read: `tk` (the kind of
+each of `tags`, one letter a tag: `w` Archive Warning, `r` relationship, `c`
+character, `f` additional tag), `r` (rating), `cat` (categories), `s`
+(`complete` or `wip`), `l` (language), `k` (kudos), `h` (hits), `upd` (the
+day it was last updated) and `ver` (AO3's note beside the visit: `latest`,
+`edits` or `update`). The inbox checks each part as it arrives. Parts may arrive in any order; the same part again is accepted,
 other bytes for it conflict. When the last part is in, the parts must add up
 to the declared bytes, works and digest, or the History is ended and its
 parts removed.
@@ -90,6 +95,22 @@ declaration and then each part through `sync.js`:
 - The declaration carries the account id, part count, bytes, items, the
   SHA-256 of the whole and the expiry; a part is the same JSON text as an
   inbox part.
+- The declaration also says how much of the History the parts hold:
+  `complete` (the read reached the last page), `since` (a day, when the
+  parts hold only the stories last visited on or after it; otherwise null),
+  `through` (the oldest last-visited day on any row the read had reached),
+  `deleted` and `unreadable` (rows of deleted works, and rows that could not
+  be read, on the pages read) and `started` (when the read began).
+
+On a computer the sheet can offer a year before the whole History is read.
+AO3 lists the History newest visit first, so once the read has kept a row
+from before 1 January (1 January of the year before, during January), every
+story the listing showed as visited since then is kept, and **Review 2026 in
+Trace** offers those alone (`since`) while the read carries on. Stories
+marked for later are not among them: their rows' days are not kept. It is
+not offered when a visited work's day could not be read, or when no work was
+visited in the year. The whole History, offered when the read finishes,
+takes its place. The app's inbox is never given a year on its own.
 
 The background answers only a content script on Trace's own site, only for
 the account that started the handoff (`history_handoff_not_connected` while

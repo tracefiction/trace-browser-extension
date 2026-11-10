@@ -136,3 +136,55 @@ test("after a restart one rebuild serves every request, and a newer offer is nev
   assert.equal(declaration.sha256, fresh.sha256, "the newer offer keeps its own parts");
   assert.equal(declaration.itemCount, 51);
 });
+
+test("the declaration says how much of the History is on offer: a year first, then the whole of it in its place", async () => {
+  const ids = ["00000000-0000-4000-8000-0000000000c1", "00000000-0000-4000-8000-0000000000c2"];
+  const kept = new Map();
+  const keep = { load: async () => kept.get("offer") ?? null, save: async (v) => { kept.set("offer", v); }, clear: async () => { kept.delete("offer"); } };
+  const year = [work(1, "2026-11-03"), work(2, "2026-01-01")];
+  const all = [...year, work(3, "2025-12-31"), work(4, "2019-03-17")];
+  const since = (works, day) => (day === null ? works : works.filter((w) => w.lastVisited >= day));
+  let next = 0;
+  const web = new WebHistoryHandoff({ webOrigin: "https://www.tracefiction.test", randomID: () => ids[next], now: () => start, keep });
+  const yearCoverage = { complete: false, since: "2026-01-01", through: "2025-12-31", deleted: 1, unreadable: 0, started: "2026-11-10T11:40:00.000Z" };
+  const yearParts = await historyParts(year, "2026-11-10T12:00:00.000Z");
+  await web.offer(account, yearParts, yearCoverage);
+  const first = await web.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[0], part: "declaration" }, account);
+  assert.deepEqual(first, { ok: true, kind: "declaration", handoffID: ids[0], accountId: account, partCount: 1,
+    byteCount: yearParts.byteCount, itemCount: 2, sha256: yearParts.sha256, expiresAtMs: start + WEB_HISTORY_LIFETIME_MS, ...yearCoverage });
+
+  // The background stops while the run reads on: the year is made again from the works kept, older ones left out.
+  const restarted = new WebHistoryHandoff({ webOrigin: "https://www.tracefiction.test", randomID: () => ids[1], now: () => start + 60_000, keep });
+  restarted.useSource((at, day) => historyParts(since(all, day), at));
+  const again = await restarted.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[0], part: "declaration" }, account);
+  assert.deepEqual(again, first, "the same year and the same account of it, though the run has kept more since");
+  assert.equal((await restarted.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[0], part: 0 }, account)).text,
+    new TextDecoder().decode(yearParts.parts[0]));
+
+  // The read finishes and the reader chooses Review in Trace: the whole History takes the year's place.
+  const wholeParts = await historyParts(all, "2026-11-10T12:30:00.000Z");
+  // A story the run kept since, opened in the year: the year as offered is gone, and nothing else is given in its name.
+  const moved = new WebHistoryHandoff({ webOrigin: "https://www.tracefiction.test", randomID: () => ids[1], now: () => start + 60_000, keep });
+  moved.useSource((at, day) => historyParts(since([...all, work(5, "2026-06-01")], day), at));
+  assert.deepEqual(await moved.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[0], part: 0 }, account), { ok: false, error: "history_handoff_unknown" });
+
+  await restarted.offer(account, wholeParts, { complete: true, since: null, through: "2019-03-17", deleted: 4, unreadable: 1, started: null });
+  assert.deepEqual(await restarted.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[0], part: "declaration" }, account),
+    { ok: false, error: "history_handoff_unknown" }, "the year is no longer on offer");
+  const whole = await restarted.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[1], part: "declaration" }, account);
+  assert.deepEqual([whole.complete, whole.since, whole.through, whole.deleted, whole.unreadable, whole.itemCount],
+    [true, null, "2019-03-17", 4, 1, 4]);
+
+  // A coverage that makes no sense is never offered as if it were the whole History.
+  next = 0;
+  const plain = new WebHistoryHandoff({ webOrigin: "https://www.tracefiction.test", randomID: () => ids[0], now: () => start });
+  assert.deepEqual(await plain.offer(account, yearParts, { complete: "yes", since: "January", through: null, deleted: -1, unreadable: 0 }),
+    { ok: false, error: "history_handoff_unavailable" });
+  // An offer kept by an earlier version has no coverage: it is made again as the whole of what was kept, and says nothing more.
+  kept.set("offer", { v: 1, handoffID: ids[0], accountId: account, expiresAtMs: start + WEB_HISTORY_LIFETIME_MS,
+    capturedAt: "2026-11-10T12:30:00.000Z", sha256: wholeParts.sha256 });
+  const olderOffer = new WebHistoryHandoff({ webOrigin: "https://www.tracefiction.test", randomID: () => ids[1], now: () => start, keep });
+  olderOffer.useSource((at, day) => historyParts(since(all, day), at));
+  const bare = await olderOffer.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[0], part: "declaration" }, account);
+  assert.deepEqual([bare.itemCount, "complete" in bare, "since" in bare], [4, false, false]);
+});
