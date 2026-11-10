@@ -4,7 +4,7 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
-## Unreleased
+## 1.0.8
 
 - Trace reads more of each row when you import your AO3 History. It already read the title, author, fandoms, tags, summary, words, chapters, your last-visited date and visit count. It now also keeps which kind each tag is (Archive Warning, relationship, character or additional tag), the rating, the categories, whether AO3 marks the work complete, its language, kudos and hits, the date it was last updated, and AO3's note on whether it has updated since you last opened it. It reads all of this from the same History pages as before, at the same pace, and still never opens a work. Nothing is sent to Trace unless you import.
 - On a computer, you can review this year's stories before the whole History is read. AO3 lists your History newest first, so once Trace has read back past 1 January, the sheet offers **Review 2026 in Trace** while it reads the rest. **Review in Trace** at the end hands over the whole History in its place.
