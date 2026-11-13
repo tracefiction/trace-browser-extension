@@ -17,10 +17,11 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 // function. Everything the page could be asked to do besides being read is
 // recorded, and nothing may be: no request, timer, listener, history or
 // storage change, and the page's own markup untouched.
-async function share(fixture, url, edit = (html) => html) {
+async function share(fixture, url, edit = (html) => html, pageScript = "") {
   const html = edit(fs.readFileSync(path.join(FIXTURES, fixture), "utf8"));
   const dom = new JSDOM(html, { url, runScripts: "outside-only" });
   const { window } = dom;
+  window.eval(pageScript);
   const done = [];
   const record = (what) => (...args) => { done.push([what, ...args.map(String)]); };
   window.fetch = (...args) => { record("fetch")(...args); return Promise.reject(new Error("no requests")); };
@@ -32,6 +33,8 @@ async function share(fixture, url, edit = (html) => html) {
   window.history.pushState = record("pushState");
   for (const change of ["setItem", "removeItem", "clear"]) window.Storage.prototype[change] = record(`storage ${change}`);
   const before = window.document.documentElement.outerHTML;
+  const named = () => Object.keys(window).filter((key) => /trace/i.test(key));
+  const namedBefore = named();
 
   window.eval(sharePageReader());
   let results = null;
@@ -42,7 +45,7 @@ async function share(fixture, url, edit = (html) => html) {
   // jsdom's selector engine adds two hover listeners of its own the first time it is used.
   assert.deepEqual(done.filter(([, , handler]) => !/Snapshot\.HOVER/.test(handler ?? "")), []);
   assert.equal(window.document.documentElement.outerHTML, before);
-  assert.deepEqual(Object.keys(window).filter((key) => /trace/i.test(key)), []);
+  assert.deepEqual(named(), namedBefore);
   const page = JSON.parse(results.tracePage);
   // Story text never leaves the page.
   const plain = (text) => String(text).replace(/\s+/g, " ").trim();
@@ -120,6 +123,32 @@ test("gives back nothing for a story address with no story on the page", async (
     assert.deepEqual(await share("ao3_story.html", `https://archiveofourown.org/collections/${name}/works/123456`), {}, name);
   }
   assert.deepEqual(await share("ao3_listing.html", "https://archiveofourown.org/works/123456/bookmarks"), {});
+  // A story's address showing a page of many works.
+  assert.deepEqual(await share("ao3_listing.html", "https://archiveofourown.org/works/123456"), {});
+  assert.deepEqual(await share("ao3_bookmarks.html", "https://archiveofourown.org/works/123456/chapters/7890"), {});
+  assert.deepEqual(await share("ffn_listing_mobile.html", "https://m.fanfiction.net/s/13579246/1/"), {});
+});
+
+test("takes no settings from the page", async () => {
+  // The extension's switches are read from globalThis. A page can't set one
+  // for the reader, so nothing the switches start is started: share() fails
+  // on any listener, timer or request.
+  const settings = {
+    TRACE_PAGE_MANUAL_MODE: "true",
+    TRACE_IOS_ACTIVE_TAB_PROBE: "true",
+    TRACE_IOS_EARNED_PERMISSION_ONBOARDING: '{ registrationMode: "static" }',
+    TRACE_EARNED_PERMISSION_COMPLETE: "true",
+    TRACE_SESSION_MODE: '"kernel"',
+    browser: '{ runtime: { sendMessage() { fetch("/"); } } }',
+  };
+  const script = [
+    ...Object.entries(settings).map(([name, value]) => `Object.prototype.${name} = ${value}; window.${name} = ${value};`),
+    // Nor is anything of the reader's handed to the page.
+    'Object.defineProperty(Object.prototype, "__traceReadAo3WorkForSave", { set(value) { fetch(String(value)); }, configurable: true });',
+  ].join("\n");
+  const page = await share("ao3_story.html", "https://archiveofourown.org/works/123456/chapters/7890", undefined, script);
+  assert.equal(page.item.t, "Redivider");
+  assert.equal(page.item.chn, 1);
 });
 
 test("gives back nothing on any other site, whatever the page looks like", async () => {
@@ -129,6 +158,7 @@ test("gives back nothing on any other site, whatever the page looks like", async
     "https://evilarchiveofourown.org/works/123456",
     "https://ao3.org/works/123456",
     "http://archiveofourown.org/works/123456",
+    "https://archiveofourown.org:8443/works/123456",
   ]) assert.deepEqual(await share("ao3_story.html", url), {}, url);
   for (const url of [
     "https://example.com/s/13579246/3/",
@@ -137,6 +167,7 @@ test("gives back nothing on any other site, whatever the page looks like", async
     "https://forums.fanfiction.net/s/13579246/3/",
     "https://fanfiction.net/s/13579246/3/",
     "http://m.fanfiction.net/s/13579246/3/",
+    "https://m.fanfiction.net:8443/s/13579246/3/",
   ]) assert.deepEqual(await share("ffn_story_mobile.html", url), {}, url);
 });
 

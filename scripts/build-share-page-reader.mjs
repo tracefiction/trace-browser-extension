@@ -22,10 +22,12 @@ const READS_WITH = [
   "collectForSave", "hasStableAo3ChapterSignal", "shouldDisableTraceContentScript", "one",
 ];
 
-// The collector expects an extension to talk to. A shared page has none, so
-// it gets one that does nothing.
+// The collector expects an extension to talk to, and reads its switches from
+// globalThis. A shared page has neither, so it gets an extension that does
+// nothing and no switches. The stand-ins inherit from nothing, so the page
+// can't set a switch through Object.prototype.
 const HEAD = `var ExtensionPreprocessingJS = (function () {
-var globalThis = { chrome: { runtime: { lastError: null, sendMessage: function () {} } } };
+var globalThis = { __proto__: null, chrome: { __proto__: null, runtime: { __proto__: null, lastError: null, sendMessage: function () {} } } };
 `;
 
 // Only a single AO3 or FanFiction.net story page is answered, on the sites
@@ -33,7 +35,7 @@ var globalThis = { chrome: { runtime: { lastError: null, sendMessage: function (
 // address, no title.
 const TAIL = `
 function sharedStorySite() {
-  if (location.protocol !== "https:") return null;
+  if (location.protocol !== "https:" || location.port) return null;
   var host = String(location.hostname).toLowerCase();
   var path = String(location.pathname || "");
   if (
